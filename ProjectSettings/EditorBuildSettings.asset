@@ -20,6 +20,9 @@ EditorBuildSettings:
   - enabled: 0
     path: Assets/Scenes/Titration_Practical.unity
     guid: 1398377075e4f54409ac083b04dc2194
+  - enabled: 1
+    path: Assets/Scenes/ChemistryCuSO4Scene.unity
+    guid: 365ad6aa7d93df64092a855c68155cdf
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
   m_UseUCBPForAssetBundles: 0

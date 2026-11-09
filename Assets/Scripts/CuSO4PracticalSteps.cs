@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Events;
 using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
 
@@ -37,11 +38,30 @@ public class CuSO4PracticalSteps : MonoBehaviour
     public InteractableHighlight waterHighlight;
     public InteractableHighlight sampleHighlight;
 
+    [Header("Start screen")]
+    [Tooltip("Show the built-in start screen with the Begin Practical button")]
+    public bool showStartScreen = true;
+    [Tooltip("What Begin Practical should do, e.g. the camera move your old Begin button did (NavigationManager). Leave empty to let this script move the camera.")]
+    public UnityEvent onBeginPressed;
+    [Tooltip("If On Begin Pressed is empty, smoothly move the camera to the Practical Camera Point")]
+    public bool moveCameraIfNoEvent = true;
+    public float cameraMoveTime = 3f;
+
+    [Header("Camera points (found by name if left empty)")]
+    [Tooltip("Where the camera waits while the start screen is shown (IntroCameraPoint)")]
+    public Transform introCameraPoint;
+    [Tooltip("Optional point the camera passes through on the way (ApproachCameraPoint)")]
+    public Transform approachCameraPoint;
+
     [Header("When to start")]
     [Tooltip("Your PracticalCameraPoint. The practical starts by itself when the camera arrives there.")]
     public Transform practicalCameraPoint;
     [Tooltip("Tick to start as soon as the scene loads instead (for testing)")]
     public bool startImmediately = false;
+
+    [Header("Old scripts to remove")]
+    [Tooltip("Old practical scripts that are removed when the scene starts, so they can't react to taps any more")]
+    public string[] oldScriptNames = { "CuSO4Clickable", "CuSO4InteractionManager", "CuSO4PracticalFlow" };
 
     [Header("Old UI to hide")]
     [Tooltip("Your old instruction panel, tip bar and quiz panel. They are switched off when the practical starts.")]
@@ -50,6 +70,14 @@ public class CuSO4PracticalSteps : MonoBehaviour
     [Header("Ending")]
     [Tooltip("Scene to open when the student ends or finishes (e.g. your main menu). Leave empty to reload this scene.")]
     public string exitSceneName = "";
+
+    [Header("Step 1: apparatus labels")]
+    public string waterName = "Beaker of water";
+    [TextArea] public string waterInfo = "Holds the water we will test. A beaker is used to hold and pour liquids.";
+    public string dropperName = "Dropper";
+    [TextArea] public string dropperInfo = "Sucks up a small amount of liquid and lets it out one drop at a time.";
+    public string dishName = "China dish with anhydrous CuSO<sub>4</sub>";
+    [TextArea] public string dishInfo = "The white powder is anhydrous copper(II) sulfate. \"Anhydrous\" means it has no water in it.";
 
     [Header("Timing")]
     [Tooltip("Seconds to let the student look at the blue colour before moving on")]
@@ -111,17 +139,34 @@ public class CuSO4PracticalSteps : MonoBehaviour
 
     PracticalUI _ui;
     int _step;
-    bool _started, _busy, _inQuiz;
+    bool _started, _busy, _inQuiz, _beginRequested;
     int _quizIndex, _score;
     float _cameraStillTime;
     PracticalUI.TipKind _tipKind;
     string _tipText;
     Coroutine _hintRoutine;
+    readonly HashSet<string> _found = new HashSet<string>();
+    string _selected;
+    bool AllFound => _found.Count >= 3;
 
     // ================================================================
     void Awake()
     {
         _ui = GetComponent<PracticalUI>();
+        RemoveOldScripts();
+    }
+
+    /// <summary>Destroys the old practical scripts (only while playing; nothing is changed in your scene file).</summary>
+    void RemoveOldScripts()
+    {
+        if (oldScriptNames == null || oldScriptNames.Length == 0) return;
+        var names = new HashSet<string>(oldScriptNames);
+        int removed = 0;
+        foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (mb && names.Contains(mb.GetType().Name)) { Destroy(mb); removed++; }
+        }
+        if (removed > 0) Debug.Log($"[Practical] Removed {removed} old practical script(s) for this run.");
     }
 
     void Start()
@@ -131,9 +176,90 @@ public class CuSO4PracticalSteps : MonoBehaviour
         _ui.BackPressed += OnBack;
         _ui.RestartConfirmed += Restart;
         _ui.EndConfirmed += EndPractical;
+        _ui.BeginPressed += OnBeginPressed;
+        _ui.ThemeChanged += ReapplyGlow;
         if (sample) sample.OnFullyHydrated += OnHydrated;
 
+        if (!introCameraPoint) introCameraPoint = FindPoint("IntroCameraPoint");
+        if (!approachCameraPoint) approachCameraPoint = FindPoint("ApproachCameraPoint");
+        if (!practicalCameraPoint) practicalCameraPoint = FindPoint("PracticalCameraPoint");
+
         if (startImmediately) Begin();
+        else if (showStartScreen)
+        {
+            // Wait at the intro view while the start screen is shown, like the old version did
+            Camera sc = SceneCamera();
+            if (sc && introCameraPoint) sc.transform.SetPositionAndRotation(introCameraPoint.position, introCameraPoint.rotation);
+            _ui.ShowIntro();
+        }
+    }
+
+    void OnBeginPressed()
+    {
+        _beginRequested = true;
+        Camera cam = SceneCamera();
+        Debug.Log($"[Practical] Begin pressed. Camera: {(cam ? cam.name : "NONE")}, " +
+                  $"camera point: {(practicalCameraPoint ? practicalCameraPoint.name : "NONE")}, " +
+                  $"begin event used: {HasRealListener(onBeginPressed)}");
+
+        if (HasRealListener(onBeginPressed))
+        {
+            onBeginPressed.Invoke();          // e.g. NavigationManager moves the camera; we start when it arrives
+            if (!practicalCameraPoint) Begin();
+        }
+        else if (moveCameraIfNoEvent && practicalCameraPoint && cam)
+        {
+            StartCoroutine(MoveCameraThenBegin());
+        }
+        else Begin();
+    }
+
+    /// <summary>True only if the event has an entry with an object AND a function chosen (empty "None" rows don't count).</summary>
+    static bool HasRealListener(UnityEvent e)
+    {
+        if (e == null) return false;
+        for (int i = 0; i < e.GetPersistentEventCount(); i++)
+            if (e.GetPersistentTarget(i) != null && !string.IsNullOrEmpty(e.GetPersistentMethodName(i))) return true;
+        return false;
+    }
+
+    static Camera SceneCamera()
+    {
+        if (Camera.main) return Camera.main;
+        return FindFirstObjectByType<Camera>();
+    }
+
+    static Transform FindPoint(string name)
+    {
+        var go = GameObject.Find(name);
+        return go ? go.transform : null;
+    }
+
+    IEnumerator MoveCameraThenBegin()
+    {
+        Transform cam = SceneCamera().transform;
+        if (approachCameraPoint)
+        {
+            yield return MoveCamera(cam, approachCameraPoint, cameraMoveTime * 0.5f);
+            yield return MoveCamera(cam, practicalCameraPoint, cameraMoveTime * 0.5f);
+        }
+        else yield return MoveCamera(cam, practicalCameraPoint, cameraMoveTime);
+        Begin();
+    }
+
+    static IEnumerator MoveCamera(Transform cam, Transform target, float time)
+    {
+        Vector3 p0 = cam.position;
+        Quaternion r0 = cam.rotation;
+        float t = 0f;
+        while (t < time)
+        {
+            t += Time.deltaTime;
+            float e = Mathf.SmoothStep(0f, 1f, t / time);
+            cam.SetPositionAndRotation(Vector3.Lerp(p0, target.position, e), Quaternion.Slerp(r0, target.rotation, e));
+            yield return null;
+        }
+        cam.SetPositionAndRotation(target.position, target.rotation);
     }
 
     void OnDestroy()
@@ -165,8 +291,10 @@ public class CuSO4PracticalSteps : MonoBehaviour
 
     void WaitForCamera()
     {
-        if (!practicalCameraPoint || !Camera.main) return;
-        Transform cam = Camera.main.transform;
+        Camera sc = SceneCamera();
+        if (!practicalCameraPoint || !sc) return;
+        if (showStartScreen && !_beginRequested) return;   // wait for the Begin Practical button
+        Transform cam = sc.transform;
         bool arrived = Vector3.Distance(cam.position, practicalCameraPoint.position) < 0.05f &&
                        Quaternion.Angle(cam.rotation, practicalCameraPoint.rotation) < 3f;
         _cameraStillTime = arrived ? _cameraStillTime + Time.deltaTime : 0f;
@@ -199,8 +327,9 @@ public class CuSO4PracticalSteps : MonoBehaviour
 
     void HandleTap(Vector2 pos)
     {
-        if (IsOverUI(pos) || !Camera.main) return;
-        if (!Physics.Raycast(Camera.main.ScreenPointToRay(pos), out RaycastHit hit, 50f, ~0, QueryTriggerInteraction.Ignore)) return;
+        Camera sc = SceneCamera();
+        if (IsOverUI(pos) || !sc) return;
+        if (!Physics.Raycast(sc.ScreenPointToRay(pos), out RaycastHit hit, 50f, ~0, QueryTriggerInteraction.Ignore)) return;
 
         Transform t = hit.transform;
         bool onDropper = dropper && t.IsChildOf(dropper.transform);
@@ -208,6 +337,14 @@ public class CuSO4PracticalSteps : MonoBehaviour
         bool onSample = (sample && t.IsChildOf(sample.transform)) || (chinaDish && t.IsChildOf(chinaDish));
 
         if (_busy) return;
+
+        if (_step == 1)
+        {
+            if (onDropper) Identify("dropper");
+            else if (onWater) Identify("water");
+            else if (onSample) Identify("dish");
+            return;
+        }
 
         if (_step == 2 && onDropper) { StartCoroutine(PickUpRoutine()); return; }
         if (_step == 3 && onWater) { StartCoroutine(CollectRoutine()); return; }
@@ -237,14 +374,15 @@ public class CuSO4PracticalSteps : MonoBehaviour
     void ShowStep(int step)
     {
         _step = step;
+        if (step != 1) { _ui.HideLabel(); _selected = null; }
         switch (step)
         {
             case 1:
-                Set("Identify the apparatus",
-                    "Find the beaker of water, the dropper and the white anhydrous copper(II) sulfate in the china dish.",
-                    PracticalUI.TipKind.Tip, "Anhydrous means \"without water\". Anhydrous copper(II) sulfate is a white powder.");
-                Glow(null);
-                _ui.SetNav(false, true);
+                Set("Identify the apparatus", Checklist(),
+                    PracticalUI.TipKind.Tip, AllFound ? "You found all the apparatus. Tap Next to begin."
+                                                      : "Tap each glowing item to find out what it is.");
+                Step1Glow();
+                _ui.SetNav(false, AllFound);
                 break;
             case 2:
                 Set("Pick up the dropper", "Tap the glowing dropper to pick it up.",
@@ -387,6 +525,9 @@ public class CuSO4PracticalSteps : MonoBehaviour
         if (sample) sample.ResetSample();
         _busy = false;
         _inQuiz = false;
+        _found.Clear();
+        _selected = null;
+        _ui.HideLabel();
         if (!_started) Begin(); else ShowStep(1);
     }
 
@@ -397,10 +538,74 @@ public class CuSO4PracticalSteps : MonoBehaviour
         SceneManager.LoadScene(scene);
     }
 
+    // ---------------- step 1: identify the apparatus ----------------
+
+    void Identify(string key)
+    {
+        bool isNew = _found.Add(key);
+        _selected = key;
+
+        if (key == "water") _ui.ShowLabel(waterBeaker, waterName, waterInfo, _ui.foundColor);
+        else if (key == "dropper") _ui.ShowLabel(dropper.transform, dropperName, dropperInfo, _ui.foundColor);
+        else _ui.ShowLabel(chinaDish ? chinaDish : sample.transform, dishName, dishInfo, _ui.foundColor);
+
+        _ui.SetStep(1, TotalSteps, "Identify the apparatus", Checklist());
+        Step1Glow();
+
+        if (AllFound)
+        {
+            _tipKind = PracticalUI.TipKind.Tip;
+            _tipText = "You found all the apparatus. Tap Next to begin.";
+            _ui.SetTip(_tipKind, _tipText);
+            _ui.SetNav(false, true);
+        }
+        else if (isNew)
+        {
+            _ui.SetTip(PracticalUI.TipKind.Tip, $"{_found.Count} of 3 found. Tap the other glowing items.");
+        }
+    }
+
+    string Checklist()
+    {
+        string Item(string key, string label)
+        {
+            bool f = _found.Contains(key);
+            return f ? $"<color=#2EC4B6>\u25CF</color> <b>{label}</b>" : $"<alpha=#88>\u25CB {label}<alpha=#FF>";
+        }
+        string head = AllFound ? "All apparatus identified." : $"Tap each item to identify it ({_found.Count} of 3):";
+        return head + "\n" + Item("water", "Beaker of water") + "     " + Item("dropper", "Dropper") + "     " + Item("dish", "China dish with CuSO<sub>4</sub>");
+    }
+
+    void Step1Glow()
+    {
+        SetStep1Highlight(waterHighlight, "water");
+        SetStep1Highlight(dropperHighlight, "dropper");
+        SetStep1Highlight(sampleHighlight, "dish");
+    }
+
+    void SetStep1Highlight(InteractableHighlight h, string key)
+    {
+        if (!h) return;
+        if (_selected == key) h.SetHighlighted(true, _ui.foundColor, false);          // the one being looked at
+        else if (!_found.Contains(key)) h.SetHighlighted(true, _ui.highlightColor, false); // still to find
+        else h.SetHighlighted(false);                                             // already found
+    }
+
+    InteractableHighlight _glowTarget;
+
     void Glow(InteractableHighlight on)
     {
-        if (dropperHighlight) dropperHighlight.SetHighlighted(dropperHighlight == on);
-        if (waterHighlight) waterHighlight.SetHighlighted(waterHighlight == on);
-        if (sampleHighlight) sampleHighlight.SetHighlighted(sampleHighlight == on);
+        _glowTarget = on;
+        Color c = _ui.highlightColor;
+        if (dropperHighlight) dropperHighlight.SetHighlighted(dropperHighlight == on, c, true);
+        if (waterHighlight) waterHighlight.SetHighlighted(waterHighlight == on, c, true);
+        if (sampleHighlight) sampleHighlight.SetHighlighted(sampleHighlight == on, c, true);
+    }
+
+    void ReapplyGlow()
+    {
+        if (!_started) return;
+        if (_step == 1) Step1Glow();
+        else Glow(_glowTarget);
     }
 }

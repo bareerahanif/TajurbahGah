@@ -20,10 +20,26 @@ public class PracticalUI : MonoBehaviour
 
     [Header("Text")]
     public string practicalTitle = "Test for Water  ·  Anhydrous Copper(II) Sulfate";
+
+    [Header("Start screen")]
+    public string introLabel = "CHEMISTRY PRACTICAL";
+    public string introTitle = "Test for Water Using Anhydrous Copper(II) Sulfate";
+    [TextArea] public string introText = "Add a few drops of water to white anhydrous copper(II) sulfate and observe what happens.";
     [Tooltip("Optional. Leave empty to use the TextMeshPro default font.")]
     public TMP_FontAsset font;
 
+    public enum Theme { MidnightBlue, CleanLab, ChemistryTeal, BlossomPink, Custom }
+    static readonly string[] ThemeNames = { "Midnight Blue", "Clean Lab", "Chemistry Teal", "Blossom Pink" };
+
     [Header("Colours")]
+    [Tooltip("Starting colour theme. Students can change it any time with the Theme button. Custom uses the colours below exactly.")]
+    public Theme theme = Theme.MidnightBlue;
+    [Tooltip("Remember the student's chosen theme next time the app opens")]
+    public bool rememberTheme = true;
+    [Tooltip("Glow colour on the object to tap next")]
+    public Color highlightColor = new Color32(255, 209, 77, 255);
+    [Tooltip("Glow colour on an object that has been identified")]
+    public Color foundColor = new Color32(127, 216, 208, 255);
     public Color panelColor = new Color32(20, 26, 38, 238);
     public Color panelLight = new Color32(34, 42, 58, 245);
     public Color accent = new Color32(46, 125, 255, 255);
@@ -37,7 +53,7 @@ public class PracticalUI : MonoBehaviour
     public Color hintColor = new Color32(255, 138, 101, 255);
 
     // Raised for the step controller
-    public event Action NextPressed, BackPressed, RestartConfirmed, EndConfirmed;
+    public event Action NextPressed, BackPressed, RestartConfirmed, EndConfirmed, BeginPressed, ThemeChanged;
 
     public bool IsBlocking => _overlay != null && _overlay.gameObject.activeSelf && _blocking;
     public bool IsPaused { get; private set; }
@@ -56,7 +72,8 @@ public class PracticalUI : MonoBehaviour
     RectTransform _overlay;
     CanvasGroup _overlayGroup;
     bool _blocking;
-    RectTransform _pauseDlg, _confirmDlg, _procDlg, _quizDlg, _resultDlg;
+    RectTransform _pauseDlg, _confirmDlg, _procDlg, _quizDlg, _resultDlg, _introDlg;
+    bool _returnToIntro;
     TextMeshProUGUI _confirmTitle, _confirmMsg, _confirmYesLabel, _procText;
     Button _confirmYes;
     Image _confirmYesImg;
@@ -72,22 +89,95 @@ public class PracticalUI : MonoBehaviour
     Action _resultRestart, _resultFinish;
 
     Rect _lastSafe;
+    RectTransform _label, _labelPointer;
+    TextMeshProUGUI _labelTitle, _labelBody;
+    Image _labelImg, _labelPointerImg, _labelStripe;
+    Transform _labelTarget;
+    float _labelAge;
     Coroutine _pop;
+    GameObject _canvasGo;
+    RectTransform _themeDlg;
+    enum Origin { Hud, Pause, Intro }
+    Origin _themeOrigin;
+
+    // Remembered state, so the UI can be rebuilt in a new theme without losing anything
+    bool _hasStep;
+    int _sStep, _sTotal;
+    string _sTitle = "", _sBody = "";
+    TipKind _sTipKind;
+    string _sTip = "";
+    bool _sBack, _sNext;
+    string _sNextLabel = "Next";
+    string _sLabelTitle, _sLabelBody;
 
     // =====================================================================
+    const string ThemeKey = "TajurbahGah_Theme";
+
     void Awake()
     {
-        _round = MakeRoundedSprite(64, 22);
+        if (rememberTheme && PlayerPrefs.HasKey(ThemeKey))
+        {
+            int saved = PlayerPrefs.GetInt(ThemeKey);
+            if (saved >= 0 && saved < ThemeNames.Length) theme = (Theme)saved;
+        }
+        BuildAll();
+        Show(false);
+    }
+
+    void BuildAll()
+    {
+        ApplyTheme();
+        if (!_round) _round = MakeRoundedSprite(64, 22);
+        _progress.Clear();
+        _optionBtns.Clear();
         BuildCanvas();
         BuildTopBar();
         BuildBottom();
+        BuildLabel();
         BuildOverlay();
-        Show(false);
+    }
+
+    /// <summary>Switch theme while the practical is running. Everything on screen is kept.</summary>
+    public void SetTheme(Theme newTheme)
+    {
+        bool hudOn = _hud && _hud.gameObject.activeSelf;
+        Transform labelTarget = _labelTarget;
+
+        if (_pop != null) { StopCoroutine(_pop); _pop = null; }
+        HideOverlays();
+        if (_canvasGo) Destroy(_canvasGo);
+
+        theme = newTheme;
+        if (rememberTheme && (int)newTheme < ThemeNames.Length) { PlayerPrefs.SetInt(ThemeKey, (int)newTheme); PlayerPrefs.Save(); }
+        BuildAll();
+
+        _hud.gameObject.SetActive(hudOn);
+        if (_hasStep) SetStep(_sStep, _sTotal, _sTitle, _sBody);
+        SetTip(_sTipKind, _sTip);
+        SetNav(_sBack, _sNext, _sNextLabel);
+        if (labelTarget) ShowLabel(labelTarget, _sLabelTitle, _sLabelBody, foundColor);
+
+        ThemeChanged?.Invoke();
+        OpenThemePicker(_themeOrigin);      // stay in the picker so different themes can be tried
+    }
+
+    void OpenThemePicker(Origin from)
+    {
+        _themeOrigin = from;
+        OpenOverlay(_themeDlg, from != Origin.Intro);
+    }
+
+    void CloseThemePicker()
+    {
+        if (_themeOrigin == Origin.Pause) OpenOverlay(_pauseDlg, true);
+        else if (_themeOrigin == Origin.Intro) { HideOverlays(); OpenOverlay(_introDlg, false); }
+        else HideOverlays();
     }
 
     void Update()
     {
         if (Screen.safeArea != _lastSafe) ApplySafeArea();
+        UpdateLabel();
     }
 
     // =========================== public API ==============================
@@ -98,8 +188,36 @@ public class PracticalUI : MonoBehaviour
         if (!show) HideOverlays();
     }
 
+    /// <summary>Shows a name card floating above an object in the scene.</summary>
+    public void ShowLabel(Transform target, string title, string body, Color stripe)
+    {
+        _labelTarget = target;
+        _sLabelTitle = title;
+        _sLabelBody = body;
+        _labelTitle.text = title;
+        _labelBody.text = body;
+        _labelStripe.color = stripe;
+        _labelPointerImg.color = panelColor;
+        _label.gameObject.SetActive(true);
+        _labelAge = 0f;
+        UpdateLabel();
+    }
+
+    public void HideLabel()
+    {
+        _labelTarget = null;
+        if (_label) _label.gameObject.SetActive(false);
+    }
+
+    /// <summary>Shows the start screen with the Begin Practical button.</summary>
+    public void ShowIntro()
+    {
+        OpenOverlay(_introDlg, false);
+    }
+
     public void SetStep(int step, int total, string title, string body)
     {
+        _hasStep = true; _sStep = step; _sTotal = total; _sTitle = title; _sBody = body;
         _stepLabel.text = $"STEP {step} OF {total}";
         _stepTitle.text = title;
         _stepBody.text = body;
@@ -107,12 +225,13 @@ public class PracticalUI : MonoBehaviour
         for (int i = 0; i < _progress.Count; i++)
         {
             _progress[i].gameObject.SetActive(i < total);
-            _progress[i].color = i < step ? accent : new Color(1f, 1f, 1f, 0.15f);
+            _progress[i].color = i < step ? accent : new Color(textMain.r, textMain.g, textMain.b, 0.15f);
         }
     }
 
     public void SetTip(TipKind kind, string text)
     {
+        _sTipKind = kind; _sTip = text;
         Color c = kind == TipKind.Tip ? tipColor : kind == TipKind.Observe ? observeColor : kind == TipKind.Science ? scienceColor : hintColor;
         _tipChip.color = c;
         _tipChipText.text = kind == TipKind.Tip ? "TIP" : kind == TipKind.Observe ? "OBSERVE" : kind == TipKind.Science ? "SCIENCE" : "HINT";
@@ -121,6 +240,7 @@ public class PracticalUI : MonoBehaviour
 
     public void SetNav(bool showBack, bool showNext, string nextLabel = "Next")
     {
+        _sBack = showBack; _sNext = showNext; _sNextLabel = nextLabel;
         _backBtn.gameObject.SetActive(showBack);
         _nextBtn.gameObject.SetActive(showNext);
         _nextLabel.text = nextLabel;
@@ -196,6 +316,7 @@ public class PracticalUI : MonoBehaviour
     void BuildCanvas()
     {
         var canvasGo = new GameObject("PracticalUI Canvas", typeof(RectTransform));
+        _canvasGo = canvasGo;
         canvasGo.transform.SetParent(transform, false);
         var canvas = canvasGo.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.ScreenSpaceOverlay;
@@ -244,6 +365,7 @@ public class PracticalUI : MonoBehaviour
         var rf = row.gameObject.AddComponent<ContentSizeFitter>();
         rf.horizontalFit = rf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
+        MakeButton("ThemeBtn", row, "Theme", panelColor, 150, 72, () => OpenThemePicker(Origin.Hud));
         MakeButton("ProcedureBtn", row, "Procedure", panelColor, 200, 72, () => OpenProcedure(false));
         MakeButton("RestartBtn", row, "Restart", panelColor, 170, 72, () => AskRestart(false));
         MakeButton("PauseBtn", row, "Pause", panelColor, 150, 72, OpenPause);
@@ -292,6 +414,14 @@ public class PracticalUI : MonoBehaviour
         ch.childAlignment = TextAnchor.MiddleLeft;
         ch.childControlWidth = ch.childControlHeight = true;
         ch.childForceExpandWidth = ch.childForceExpandHeight = false;
+
+        var bar = NewPanel("AccentBar", card.transform, accent);
+        bar.pixelsPerUnitMultiplier = 6f;
+        var barLE = bar.gameObject.AddComponent<LayoutElement>();
+        barLE.preferredWidth = barLE.minWidth = 8;
+        barLE.minHeight = 150;
+        ch.padding = new RectOffset(28, 32, 30, 30);
+        ch.spacing = 28;
 
         var left = NewRect("Text", card.transform);
         var lv = left.gameObject.AddComponent<VerticalLayoutGroup>();
@@ -350,12 +480,30 @@ public class PracticalUI : MonoBehaviour
         dim.color = new Color(0, 0, 0, 0.62f);           // also blocks taps behind it
         _overlayGroup = _overlay.gameObject.AddComponent<CanvasGroup>();
 
+        // ---- Start screen ----
+        _introDlg = NewDialog("IntroDialog", 1150);
+        var il = NewText("Label", _introDlg, introLabel, 26, accent, FontStyles.Bold, TextAlignmentOptions.Center);
+        il.characterSpacing = 8;
+        NewText("Title", _introDlg, introTitle, 56, textMain, FontStyles.Bold, TextAlignmentOptions.Center);
+        NewText("Text", _introDlg, introText, 32, textMuted, FontStyles.Normal, TextAlignmentOptions.Center);
+        var irow = NewRect("Row", _introDlg);
+        var irh = irow.gameObject.AddComponent<HorizontalLayoutGroup>();
+        irh.spacing = 20;
+        irh.padding = new RectOffset(0, 0, 16, 0);
+        irh.childControlWidth = irh.childControlHeight = true;
+        irh.childForceExpandWidth = true;
+        irh.childForceExpandHeight = false;
+        MakeButton("Procedure", irow, "Read Procedure", panelLight, 0, 96, OpenProcedureFromIntro);
+        MakeButton("Begin", irow, "Begin Practical", accent, 0, 96, () => { HideOverlays(); BeginPressed?.Invoke(); });
+        MakeButton("Theme", _introDlg, "Change Theme", panelLight, 0, 70, () => OpenThemePicker(Origin.Intro));
+
         // ---- Pause ----
         _pauseDlg = NewDialog("PauseDialog", 720);
         NewText("Title", _pauseDlg, "Paused", 52, textMain, FontStyles.Bold, TextAlignmentOptions.Center);
         NewText("Sub", _pauseDlg, "The practical is paused. Take your time.", 30, textMuted, FontStyles.Normal, TextAlignmentOptions.Center);
         MakeButton("Resume", _pauseDlg, "Resume", accent, 0, 90, HideOverlays);
         MakeButton("Procedure", _pauseDlg, "Read Procedure", panelLight, 0, 84, () => OpenProcedure(true));
+        MakeButton("Theme", _pauseDlg, "Change Theme", panelLight, 0, 84, () => OpenThemePicker(Origin.Pause));
         MakeButton("Restart", _pauseDlg, "Restart Practical", panelLight, 0, 84, () => AskRestart(true));
         MakeButton("End", _pauseDlg, "End Practical", danger, 0, 84, () => AskEnd(true));
 
@@ -438,6 +586,25 @@ public class PracticalUI : MonoBehaviour
         _quizFeedback = NewText("Feedback", _quizDlg, "", 30, success, FontStyles.Normal, TextAlignmentOptions.Center);
         _quizContinue = MakeButton("Continue", _quizDlg, "Continue", accent, 0, 88, null);
 
+        // ---- Theme picker ----
+        _themeDlg = NewDialog("ThemeDialog", 820);
+        NewText("Title", _themeDlg, "Choose a Theme", 48, textMain, FontStyles.Bold, TextAlignmentOptions.Center);
+        for (int i = 0; i < ThemeNames.Length; i++)
+        {
+            var c = GetThemeColors((Theme)i);
+            int idx = i;
+            string mark = (int)theme == i ? "\u25CF  " : "";
+            var b = MakeButton("Theme" + i, _themeDlg, mark + ThemeNames[i], c.accent, 0, 90, () => SetTheme((Theme)idx));
+            // a strip of the theme's panel colour on the left, as a preview
+            var sw = NewPanel("Swatch", b.transform, c.panel);
+            var srt = sw.rectTransform;
+            srt.anchorMin = new Vector2(0, 0); srt.anchorMax = new Vector2(0, 1);
+            srt.pivot = new Vector2(0, 0.5f);
+            srt.offsetMin = new Vector2(12, 12); srt.offsetMax = new Vector2(72, -12);
+            sw.raycastTarget = false;
+        }
+        MakeButton("Done", _themeDlg, "Done", panelLight, 0, 80, CloseThemePicker);
+
         // ---- Results ----
         _resultDlg = NewDialog("ResultDialog", 900);
         NewText("Title", _resultDlg, "Practical Complete!", 54, textMain, FontStyles.Bold, TextAlignmentOptions.Center);
@@ -461,7 +628,7 @@ public class PracticalUI : MonoBehaviour
     {
         _overlay.gameObject.SetActive(true);
         _overlay.SetAsLastSibling();
-        foreach (var d in new[] { _pauseDlg, _confirmDlg, _procDlg, _quizDlg, _resultDlg })
+        foreach (var d in new[] { _pauseDlg, _confirmDlg, _procDlg, _quizDlg, _resultDlg, _introDlg, _themeDlg })
             d.gameObject.SetActive(d == dialog);
         _blocking = true;
         if (pauseGame && !IsPaused) { IsPaused = true; Time.timeScale = 0f; }
@@ -486,9 +653,16 @@ public class PracticalUI : MonoBehaviour
 
     void OpenPause() => OpenOverlay(_pauseDlg, true);
 
+    void OpenProcedureFromIntro()
+    {
+        OpenProcedure(false);
+        _returnToIntro = true;
+    }
+
     void OpenProcedure(bool fromPause)
     {
         _returnToPause = fromPause;
+        _returnToIntro = false;
         _procText.text = procedureText;
         OpenOverlay(_procDlg, true);
         Canvas.ForceUpdateCanvases();
@@ -497,6 +671,7 @@ public class PracticalUI : MonoBehaviour
 
     void CloseProcedure()
     {
+        if (_returnToIntro) { _returnToIntro = false; HideOverlays(); OpenOverlay(_introDlg, false); return; }
         if (_returnToPause) OpenOverlay(_pauseDlg, true);
         else HideOverlays();
     }
@@ -602,10 +777,177 @@ public class PracticalUI : MonoBehaviour
         if (width > 0) le.preferredWidth = le.minWidth = width;
         le.preferredHeight = le.minHeight = height;
 
-        var t = NewText("Label", img.transform, label, 32, textMain, FontStyles.Bold, TextAlignmentOptions.Center);
+        var t = NewText("Label", img.transform, label, 32, ReadableOn(bg), FontStyles.Bold, TextAlignmentOptions.Center);
         Stretch(t.rectTransform, 20, 20, 8, 8);
         t.textWrappingMode = TextWrappingModes.Normal;
         return b;
+    }
+
+    /// <summary>White text on dark colours, dark text on light colours.</summary>
+    Color ReadableOn(Color bg)
+    {
+        float lum = 0.2126f * bg.r + 0.7152f * bg.g + 0.0722f * bg.b;
+        return lum > 0.6f ? new Color32(27, 36, 51, 255) : Color.white;
+    }
+
+    struct ThemeColors
+    {
+        public Color panel, light, accent, text, muted, tip, observe, science, hint, danger, success, highlight, found;
+    }
+
+    static ThemeColors GetThemeColors(Theme t)
+    {
+        // Shared defaults (used by the blue, white and teal themes)
+        var c = new ThemeColors
+        {
+            tip = new Color32(255, 196, 77, 255),
+            observe = new Color32(46, 196, 182, 255),
+            science = new Color32(160, 128, 255, 255),
+            hint = new Color32(255, 138, 101, 255),
+            danger = new Color32(220, 76, 76, 255),
+            success = new Color32(46, 170, 96, 255),
+            highlight = new Color32(255, 209, 77, 255),
+            found = new Color32(46, 196, 182, 255),
+        };
+        switch (t)
+        {
+            case Theme.CleanLab:            // white cards, blue buttons, dark text
+                c.panel = new Color32(255, 255, 255, 245);
+                c.light = new Color32(232, 238, 246, 255);
+                c.accent = new Color32(31, 111, 235, 255);
+                c.text = new Color32(27, 36, 51, 255);
+                c.muted = new Color32(74, 85, 104, 255);
+                break;
+            case Theme.ChemistryTeal:       // deep teal panels, teal buttons
+                c.panel = new Color32(14, 38, 42, 240);
+                c.light = new Color32(28, 63, 68, 250);
+                c.accent = new Color32(25, 181, 165, 255);
+                c.text = Color.white;
+                c.muted = new Color32(190, 222, 218, 255);
+                c.found = new Color32(255, 140, 190, 255);
+                break;
+            case Theme.BlossomPink:         // dark berry panels, hot-pink buttons, pink glow
+                c.panel = new Color32(44, 18, 38, 240);
+                c.light = new Color32(72, 32, 62, 250);
+                c.accent = new Color32(255, 92, 160, 255);
+                c.text = Color.white;
+                c.muted = new Color32(244, 204, 224, 255);
+                c.tip = new Color32(255, 170, 205, 255);
+                c.observe = new Color32(127, 216, 208, 255);
+                c.science = new Color32(195, 165, 255, 255);
+                c.danger = new Color32(222, 70, 104, 255);
+                c.highlight = new Color32(255, 120, 180, 255);
+                c.found = new Color32(127, 216, 208, 255);
+                break;
+            default:                        // MidnightBlue: dark navy panels, bright blue buttons
+                c.panel = new Color32(18, 24, 36, 240);
+                c.light = new Color32(36, 46, 64, 250);
+                c.accent = new Color32(61, 139, 255, 255);
+                c.text = Color.white;
+                c.muted = new Color32(196, 206, 220, 255);
+                break;
+        }
+        return c;
+    }
+
+    void ApplyTheme()
+    {
+        if (theme == Theme.Custom) return;
+        var c = GetThemeColors(theme);
+        panelColor = c.panel; panelLight = c.light; accent = c.accent;
+        textMain = c.text; textMuted = c.muted;
+        tipColor = c.tip; observeColor = c.observe; scienceColor = c.science; hintColor = c.hint;
+        danger = c.danger; success = c.success;
+        highlightColor = c.highlight; foundColor = c.found;
+    }
+
+    void BuildLabel()
+    {
+        _label = NewRect("ObjectLabel", _hud);
+        _label.anchorMin = _label.anchorMax = new Vector2(0.5f, 0.5f);
+        _label.pivot = new Vector2(0.5f, 0f);
+
+        var card = NewPanel("Card", _label, panelColor);
+        _labelImg = card;
+        var crt = card.rectTransform;
+        crt.anchorMin = new Vector2(0.5f, 0f);
+        crt.anchorMax = new Vector2(0.5f, 0f);
+        crt.pivot = new Vector2(0.5f, 0f);
+        crt.anchoredPosition = new Vector2(0, 14);
+        var h = card.gameObject.AddComponent<HorizontalLayoutGroup>();
+        h.padding = new RectOffset(18, 26, 18, 20);
+        h.spacing = 16;
+        h.childControlWidth = h.childControlHeight = true;
+        h.childForceExpandWidth = false;
+        h.childForceExpandHeight = true;
+        var fit = card.gameObject.AddComponent<ContentSizeFitter>();
+        fit.horizontalFit = fit.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+        _labelStripe = NewPanel("Stripe", card.transform, accent);
+        _labelStripe.pixelsPerUnitMultiplier = 6f;
+        var sle = _labelStripe.gameObject.AddComponent<LayoutElement>();
+        sle.preferredWidth = sle.minWidth = 7;
+
+        var col = NewRect("Text", card.transform);
+        var v = col.gameObject.AddComponent<VerticalLayoutGroup>();
+        v.spacing = 4;
+        v.childControlWidth = v.childControlHeight = true;
+        v.childForceExpandWidth = true;
+        v.childForceExpandHeight = false;
+        var cle = col.gameObject.AddComponent<LayoutElement>();
+        cle.preferredWidth = 520;
+        _labelTitle = NewText("Title", col, "", 32, textMain, FontStyles.Bold);
+        _labelBody = NewText("Body", col, "", 26, textMuted);
+
+        // Little diamond under the card pointing at the object
+        var ptr = NewRect("Pointer", _label);
+        _labelPointer = ptr;
+        _labelPointerImg = ptr.gameObject.AddComponent<Image>();
+        _labelPointerImg.color = panelColor;
+        ptr.sizeDelta = new Vector2(26, 26);
+        ptr.anchorMin = ptr.anchorMax = new Vector2(0.5f, 0f);
+        ptr.anchoredPosition = new Vector2(0, 14);
+        ptr.localRotation = Quaternion.Euler(0, 0, 45);
+        ptr.SetAsFirstSibling();
+
+        _label.gameObject.SetActive(false);
+    }
+
+    void UpdateLabel()
+    {
+        if (!_label || !_label.gameObject.activeSelf) return;
+        if (!_labelTarget) { HideLabel(); return; }
+        Camera cam = Camera.main ? Camera.main : FindFirstObjectByType<Camera>();
+        if (!cam) return;
+
+        // Top of the object on screen
+        Bounds b = new Bounds(_labelTarget.position, Vector3.zero);
+        bool any = false;
+        foreach (var r in _labelTarget.GetComponentsInChildren<Renderer>())
+        {
+            if (!any) { b = r.bounds; any = true; } else b.Encapsulate(r.bounds);
+        }
+        Vector3 sp = cam.WorldToScreenPoint(new Vector3(b.center.x, b.max.y, b.center.z));
+        if (sp.z < 0f) { _label.gameObject.SetActive(false); return; }
+
+        RectTransformUtility.ScreenPointToLocalPointInRectangle(_hud, sp, null, out Vector2 local);
+        local.y += 24f;
+
+        // Keep the card on screen
+        var card = _labelImg.rectTransform;
+        float halfW = card.rect.width * 0.5f + 20f;
+        Rect area = _hud.rect;
+        float x = Mathf.Clamp(local.x, area.xMin + halfW, area.xMax - halfW);
+        float y = Mathf.Min(local.y, area.yMax - card.rect.height - 140f);
+        _label.anchoredPosition = new Vector2(x, y);
+        _labelPointer.anchoredPosition = new Vector2(local.x - x, 14);
+
+        // Small pop when it first appears
+        if (_labelAge < 0.15f)
+        {
+            _labelAge += Time.unscaledDeltaTime;
+            _label.localScale = Vector3.one * Mathf.Lerp(0.9f, 1f, Mathf.Clamp01(_labelAge / 0.15f));
+        }
     }
 
     static void Stretch(RectTransform rt, float l = 0, float r = 0, float top = 0, float bottom = 0)

@@ -19,12 +19,25 @@ public class InteractableHighlight : MonoBehaviour
     [Tooltip("Arrow height in metres")]
     public float arrowSize = 0.025f;
 
+    [Header("Ring")]
+    [Tooltip("A pulsing glowing ring around the object. Shows up even on white objects, where the glow is hard to see.")]
+    public bool showRing = true;
+    [Tooltip("Ring size compared with the object's width")]
+    public float ringScale = 1.15f;
+    [Tooltip("Ring thickness in metres")]
+    public float ringWidth = 0.004f;
+
     static readonly int EmissionId = Shader.PropertyToID("_EmissionColor");
     static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
 
     readonly List<Material> _mats = new List<Material>();
+    readonly List<Material> _glowMats = new List<Material>();
+    Color _currentColor;
+    bool _arrowOn;
     Renderer[] _renderers;
     Transform _arrow;
+    Transform _ring;
+    float _ringBaseRadius = 1f;
     bool _on;
 
     void Awake()
@@ -41,19 +54,33 @@ public class InteractableHighlight : MonoBehaviour
                 _mats.Add(m);
             }
         }
+        _currentColor = glowColor;
         if (showArrow) _arrow = BuildArrow();
+        if (showRing) _ring = BuildRing();
         SetHighlighted(false);
     }
 
     void OnDestroy()
     {
         if (_arrow) Destroy(_arrow.gameObject);
+        if (_ring) Destroy(_ring.gameObject);
     }
 
-    public void SetHighlighted(bool on)
+    public void SetHighlighted(bool on) => SetHighlighted(on, glowColor, true);
+
+    /// <summary>Turn the highlight on/off with a specific colour, with or without the bobbing arrow.</summary>
+    public void SetHighlighted(bool on, Color color, bool withArrow)
     {
         _on = on;
-        if (_arrow) _arrow.gameObject.SetActive(on);
+        _arrowOn = withArrow;
+        _currentColor = color;
+        foreach (var m in _glowMats)
+        {
+            if (m.HasProperty(BaseColorId)) m.SetColor(BaseColorId, color); else m.color = color;
+            if (m.HasProperty(EmissionId)) m.SetColor(EmissionId, color * 0.8f);
+        }
+        if (_arrow) _arrow.gameObject.SetActive(on && withArrow);
+        if (_ring) _ring.gameObject.SetActive(on);
         if (!on) SetEmission(Color.black);
     }
 
@@ -61,14 +88,23 @@ public class InteractableHighlight : MonoBehaviour
     {
         if (!_on) return;
         float k = (Mathf.Sin(Time.time * pulseSpeed) * 0.5f + 0.5f) * maxIntensity;
-        SetEmission(glowColor * k);
+        SetEmission(_currentColor * k);
 
-        if (_arrow)
+        if (_arrow && _arrowOn)
         {
             Bounds b = WorldBounds();
             float bob = (Mathf.Sin(Time.time * 4f) * 0.5f + 0.5f) * 0.01f;
             _arrow.position = new Vector3(b.center.x, b.max.y + arrowGap + bob, b.center.z);
             _arrow.Rotate(Vector3.up, 90f * Time.deltaTime, Space.World);
+        }
+
+        if (_ring)
+        {
+            Bounds b = WorldBounds();
+            float r = Mathf.Max(b.extents.x, b.extents.z) * ringScale;
+            float pulse = 1f + (Mathf.Sin(Time.time * pulseSpeed) * 0.5f + 0.5f) * 0.12f;
+            _ring.position = new Vector3(b.center.x, b.max.y + 0.003f, b.center.z);
+            _ring.localScale = Vector3.one * (r * pulse / _ringBaseRadius);
         }
     }
 
@@ -87,6 +123,60 @@ public class InteractableHighlight : MonoBehaviour
             if (!any) { b = r.bounds; any = true; } else b.Encapsulate(r.bounds);
         }
         return b;
+    }
+
+    Transform BuildRing()
+    {
+        // A flat ring (outer radius 1 before scaling); its width is kept in metres using the first known size
+        const int seg = 48;
+        Bounds b = WorldBounds();
+        float r = Mathf.Max(0.005f, Mathf.Max(b.extents.x, b.extents.z) * ringScale);
+        _ringBaseRadius = 1f;
+        float inner = Mathf.Clamp01(1f - ringWidth / r);
+        var verts = new List<Vector3>();
+        var tris = new List<int>();
+        for (int i = 0; i < seg; i++)
+        {
+            float a = i / (float)seg * Mathf.PI * 2f;
+            Vector3 d = new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a));
+            verts.Add(d);            // outer
+            verts.Add(d * inner);    // inner
+        }
+        for (int i = 0; i < seg; i++)
+        {
+            int o0 = i * 2, i0 = o0 + 1, o1 = ((i + 1) % seg) * 2, i1 = o1 + 1;
+            // top faces
+            tris.Add(o0); tris.Add(i0); tris.Add(o1);
+            tris.Add(o1); tris.Add(i0); tris.Add(i1);
+            // bottom faces (so it is visible from any angle)
+            tris.Add(o0); tris.Add(o1); tris.Add(i0);
+            tris.Add(o1); tris.Add(i1); tris.Add(i0);
+        }
+        var mesh = new Mesh { name = "HighlightRing" };
+        mesh.SetVertices(verts);
+        mesh.SetTriangles(tris, 0);
+        mesh.RecalculateNormals();
+
+        var go = new GameObject(name + " Ring");
+        go.AddComponent<MeshFilter>().sharedMesh = mesh;
+        var mr = go.AddComponent<MeshRenderer>();
+        mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        mr.sharedMaterial = MakeGlowMaterial();
+        return go.transform;
+    }
+
+    Material MakeGlowMaterial()
+    {
+        // Re-use this object's own shader so it is guaranteed to be included in the Android build
+        Shader sh = null;
+        foreach (var r in _renderers) if (r && r.sharedMaterial) { sh = r.sharedMaterial.shader; break; }
+        if (!sh) return null;
+        var m = new Material(sh);
+        if (m.HasProperty(BaseColorId)) m.SetColor(BaseColorId, glowColor);
+        else m.color = glowColor;
+        if (m.HasProperty(EmissionId)) { m.EnableKeyword("_EMISSION"); m.SetColor(EmissionId, glowColor * 0.8f); }
+        _glowMats.Add(m);
+        return m;
     }
 
     Transform BuildArrow()
@@ -117,17 +207,7 @@ public class InteractableHighlight : MonoBehaviour
         var mr = go.AddComponent<MeshRenderer>();
         mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
 
-        // Re-use this object's own shader so it is guaranteed to be included in the Android build
-        Shader sh = null;
-        foreach (var r in _renderers) if (r && r.sharedMaterial) { sh = r.sharedMaterial.shader; break; }
-        if (sh)
-        {
-            var m = new Material(sh);
-            if (m.HasProperty(BaseColorId)) m.SetColor(BaseColorId, glowColor);
-            else m.color = glowColor;
-            if (m.HasProperty(EmissionId)) { m.EnableKeyword("_EMISSION"); m.SetColor(EmissionId, glowColor * 0.8f); }
-            mr.sharedMaterial = m;
-        }
+        mr.sharedMaterial = MakeGlowMaterial();
         return go.transform;
     }
 }

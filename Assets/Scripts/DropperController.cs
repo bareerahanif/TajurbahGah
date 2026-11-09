@@ -33,6 +33,15 @@ public class DropperController : MonoBehaviour
     [Tooltip("Drop diameter in metres")]
     public float dropletSize = 0.008f;
 
+    [Header("Water inside the dropper")]
+    public bool showWaterInDropper = true;
+    [Tooltip("Where the water starts, measured from the tip (0 = at the tip, as a fraction of the dropper's length)")]
+    [Range(0f, 0.5f)] public float waterStart = 0.08f;
+    [Tooltip("How long the water column is when full (fraction of the dropper's length)")]
+    [Range(0.05f, 0.8f)] public float waterLength = 0.35f;
+    [Tooltip("Thickness of the water column (fraction of the dropper's thickness). Make it smaller if it pokes out of the glass.")]
+    [Range(0.05f, 1f)] public float waterThickness = 0.3f;
+
     [Header("Motion")]
     public float liftHeight = 0.12f;
     public float moveTime = 0.9f;
@@ -58,6 +67,10 @@ public class DropperController : MonoBehaviour
     Vector3 _bulbScale;
     Collider[] _myColliders;
     readonly List<WaterDroplet> _liveDrops = new List<WaterDroplet>();
+    MeshFilter _waterMF;
+    Mesh _waterMesh;
+    Vector3 _centreLocal;
+    float _fill;
 
     void Awake()
     {
@@ -73,6 +86,9 @@ public class DropperController : MonoBehaviour
         // Rotation that makes the tip point straight down
         Vector3 tipDir = (tip.position - transform.TransformPoint(centreLocal)).normalized;
         _uprightRot = Quaternion.FromToRotation(tipDir, Vector3.down) * transform.rotation;
+
+        _centreLocal = centreLocal;
+        if (showWaterInDropper) CreateWaterColumn();
     }
 
     // ================= steps =================
@@ -100,7 +116,7 @@ public class DropperController : MonoBehaviour
         yield return MoveTip(dip, moveTime * 0.6f, 0f);
         yield return Squeeze(0.3f);
         Play(suckClip);
-        yield return new WaitForSeconds(0.35f);
+        yield return Animate(0.6f, t => SetFill(t));      // water rises inside the dropper
         yield return MoveTip(above, moveTime * 0.6f, 0f);
 
         HasWater = true;
@@ -120,6 +136,8 @@ public class DropperController : MonoBehaviour
 
         for (int i = 0; i < dropCount; i++)
         {
+            float before = _fill, after = 1f - (i + 1f) / dropCount;
+            StartCoroutine(Animate(dropGrowTime, t => SetFill(Mathf.Lerp(before, after, t))));
             yield return FormAndReleaseDrop();
             yield return new WaitForSeconds(timeBetweenDrops);
         }
@@ -151,6 +169,7 @@ public class DropperController : MonoBehaviour
         HasWater = false;
         IsHeld = false;
         IsBusy = false;
+        SetFill(0f);
     }
 
     // ================= drops =================
@@ -239,6 +258,86 @@ public class DropperController : MonoBehaviour
         if (audioSource && clip) audioSource.PlayOneShot(clip);
     }
 
+    // ================= water column inside the dropper =================
+
+    void CreateWaterColumn()
+    {
+        var go = new GameObject("WaterInDropper");
+        go.transform.SetParent(transform, false);           // same space as the dropper
+        _waterMF = go.AddComponent<MeshFilter>();
+        var mr = go.AddComponent<MeshRenderer>();
+        mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        Material mat = dropletMaterial ? dropletMaterial : (waterLiquid ? waterLiquid.sharedMaterial : null);
+        if (mat) mr.sharedMaterial = mat;
+        _waterMesh = new Mesh { name = "WaterInDropper" };
+        _waterMF.sharedMesh = _waterMesh;
+        SetFill(0f);
+    }
+
+    /// <summary>0 = empty, 1 = full. Rebuilds the little water cylinder inside the glass.</summary>
+    void SetFill(float fill)
+    {
+        _fill = Mathf.Clamp01(fill);
+        if (!_waterMF) return;
+        _waterMF.gameObject.SetActive(_fill > 0.01f);
+        if (_fill <= 0.01f) return;
+
+        // Work in world units, then convert to the dropper's local space
+        Vector3 tipW = tip.position;
+        Vector3 centreW = transform.TransformPoint(_centreLocal);
+        Vector3 inward = (centreW - tipW).normalized;
+
+        Bounds lb = LocalBounds();
+        Vector3 ls = transform.lossyScale;
+        Vector3 size = new Vector3(lb.size.x * Mathf.Abs(ls.x), lb.size.y * Mathf.Abs(ls.y), lb.size.z * Mathf.Abs(ls.z));
+        float length = Mathf.Max(size.x, Mathf.Max(size.y, size.z));
+        float a = size.x, b = size.y, c = size.z;
+        float shortMax = (length == a) ? Mathf.Max(b, c) : (length == b) ? Mathf.Max(a, c) : Mathf.Max(a, b);
+        float radius = shortMax * 0.5f * waterThickness;
+
+        Vector3 startW = tipW + inward * length * waterStart;
+        Vector3 endW = startW + inward * length * waterLength * _fill;
+
+        Vector3 side = Vector3.Cross(inward, Vector3.up);
+        if (side.sqrMagnitude < 1e-4f) side = Vector3.Cross(inward, Vector3.right);
+        side.Normalize();
+        Vector3 up2 = Vector3.Cross(side, inward).normalized;
+
+        const int seg = 16;
+        var verts = new Vector3[seg * 2 + 2];
+        for (int i = 0; i < seg; i++)
+        {
+            float ang = i / (float)seg * Mathf.PI * 2f;
+            Vector3 off = (side * Mathf.Cos(ang) + up2 * Mathf.Sin(ang)) * radius;
+            verts[i] = transform.InverseTransformPoint(startW + off);
+            verts[seg + i] = transform.InverseTransformPoint(endW + off);
+        }
+        verts[seg * 2] = transform.InverseTransformPoint(startW);
+        verts[seg * 2 + 1] = transform.InverseTransformPoint(endW);
+
+        var tris = new List<int>();
+        for (int i = 0; i < seg; i++)
+        {
+            int i2 = (i + 1) % seg;
+            tris.Add(i); tris.Add(seg + i); tris.Add(i2);
+            tris.Add(i2); tris.Add(seg + i); tris.Add(seg + i2);
+            tris.Add(seg * 2); tris.Add(i); tris.Add(i2);                 // cap at tip end
+            tris.Add(seg * 2 + 1); tris.Add(seg + i2); tris.Add(seg + i); // cap at top
+        }
+        // Make sure faces point outwards whatever the orientation
+        Vector3 n0 = Vector3.Cross(verts[seg] - verts[0], verts[1] - verts[0]);
+        Vector3 outward = verts[0] - transform.InverseTransformPoint(startW);
+        bool flip = Vector3.Dot(n0, outward) < 0f;
+        if (flip)
+            for (int k = 0; k < tris.Count; k += 3) { int tmp = tris[k + 1]; tris[k + 1] = tris[k + 2]; tris[k + 2] = tmp; }
+
+        _waterMesh.Clear();
+        _waterMesh.vertices = verts;
+        _waterMesh.triangles = tris.ToArray();
+        _waterMesh.RecalculateNormals();
+        _waterMesh.RecalculateBounds();
+    }
+
     // ================= auto setup =================
 
     Bounds SampleBounds()
@@ -255,7 +354,7 @@ public class DropperController : MonoBehaviour
         Bounds lb = new Bounds();
         foreach (var mf in GetComponentsInChildren<MeshFilter>())
         {
-            if (!mf.sharedMesh) continue;
+            if (!mf.sharedMesh || mf == _waterMF) continue;
             Bounds mb = mf.sharedMesh.bounds;
             Vector3 mn = mb.min, mx = mb.max;
             for (int i = 0; i < 8; i++)
