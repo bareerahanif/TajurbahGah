@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1045 &1
+EditorBuildSettings:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+  m_Scenes:
+  - enabled: 0
+    path: Assets/Scenes/Menu.unity
+    guid: c1d743072b37495458d731c0fda849e0
+  - enabled: 0
+    path: Assets/Scenes/SampleScene.unity
+    guid: 99c9720ab356a0642a771bea13969a05
+  - enabled: 0
+    path: Assets/Scenes/LabScene.unity
+    guid: a0955dce1c995a946998e6d3b2a33da5
+  - enabled: 0
+    path: Assets/Scenes/Loading.unity
+    guid: 3dbe94d01acb68442b7f9f134213f14c
+  - enabled: 0
+    path: Assets/Scenes/Titration_Practical.unity
+    guid: 1398377075e4f54409ac083b04dc2194
+  m_configObjects:
+    com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
+  m_UseUCBPForAssetBundles: 0
