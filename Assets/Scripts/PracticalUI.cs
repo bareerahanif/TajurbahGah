@@ -54,6 +54,11 @@ public class PracticalUI : MonoBehaviour
 
     // Raised for the step controller
     public event Action NextPressed, BackPressed, RestartConfirmed, EndConfirmed, BeginPressed, ThemeChanged;
+    /// <summary>+1 = zoom in, -1 = zoom out, 0 = fit (reset view)</summary>
+    public event Action<int> ZoomPressed;
+    [Tooltip("Show the + / - / Fit zoom buttons on the right edge of the screen")]
+    public bool showZoomButtons = false;
+    RectTransform _zoomCol;
 
     public bool IsBlocking => _overlay != null && _overlay.gameObject.activeSelf && _blocking;
     public bool IsPaused { get; private set; }
@@ -73,6 +78,11 @@ public class PracticalUI : MonoBehaviour
     CanvasGroup _overlayGroup;
     bool _blocking;
     RectTransform _pauseDlg, _confirmDlg, _procDlg, _quizDlg, _resultDlg, _introDlg;
+    RectTransform _angleDlg, _infoDlg;
+    TextMeshProUGUI _angleTitle, _anglePrompt, _angleValue, _infoTitle, _infoBody, _infoBtnLabel, _quizHeader;
+    int _angle;
+    Action<int> _angleSubmit;
+    Action _infoClose;
     bool _returnToIntro;
     TextMeshProUGUI _confirmTitle, _confirmMsg, _confirmYesLabel, _procText;
     Button _confirmYes;
@@ -246,9 +256,47 @@ public class PracticalUI : MonoBehaviour
         _nextLabel.text = nextLabel;
     }
 
+    /// <summary>A single multiple-choice question during the practical (uses the quiz card with a custom header).</summary>
+    public void ShowChoice(string header, string question, string[] options, Action<int> onAnswer)
+    {
+        ShowQuiz(0, 1, question, options, onAnswer);
+        _quizHeader.text = header;
+        _quizCounter.text = "";
+        _quizCounter.gameObject.SetActive(false);
+    }
+
+    /// <summary>A pad for entering an angle in whole degrees.</summary>
+    public void ShowAngleInput(string title, string prompt, int startValue, Action<int> onSubmit)
+    {
+        _angleTitle.text = title;
+        _anglePrompt.text = prompt;
+        _angle = Mathf.Clamp(startValue, 0, 180);
+        _angleValue.text = _angle + "\u00b0";
+        _angleSubmit = onSubmit;
+        OpenOverlay(_angleDlg, false);
+    }
+
+    /// <summary>A window with a title, rich text (e.g. a table) and one button.</summary>
+    public void ShowInfo(string title, string body, string buttonLabel, Action onClose)
+    {
+        _infoTitle.text = title;
+        _infoBody.text = body;
+        _infoBtnLabel.text = buttonLabel;
+        _infoClose = onClose;
+        OpenOverlay(_infoDlg, false);
+    }
+
+    void ChangeAngle(int delta)
+    {
+        _angle = Mathf.Clamp(_angle + delta, 0, 180);
+        _angleValue.text = _angle + "\u00b0";
+    }
+
     public void ShowQuiz(int index, int count, string question, string[] options, Action<int> onAnswer)
     {
         OpenOverlay(_quizDlg, false);
+        _quizHeader.text = "CHECK YOUR UNDERSTANDING";
+        _quizCounter.gameObject.SetActive(true);
         _quizCounter.text = $"Question {index + 1} of {count}";
         _quizQuestion.text = question;
         _quizFeedback.text = "";
@@ -366,10 +414,33 @@ public class PracticalUI : MonoBehaviour
         rf.horizontalFit = rf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
         MakeButton("ThemeBtn", row, "Theme", panelColor, 150, 72, () => OpenThemePicker(Origin.Hud));
-        MakeButton("ProcedureBtn", row, "Procedure", panelColor, 200, 72, () => OpenProcedure(false));
+        MakeButton("ProcedureBtn", row, "Procedure", panelColor, 240, 72, () => OpenProcedure(false));
         MakeButton("RestartBtn", row, "Restart", panelColor, 170, 72, () => AskRestart(false));
         MakeButton("PauseBtn", row, "Pause", panelColor, 150, 72, OpenPause);
         MakeButton("EndBtn", row, "End", danger, 130, 72, () => AskEnd(false));
+
+        // Zoom buttons (right edge, middle)
+        _zoomCol = NewRect("ZoomButtons", _hud);
+        _zoomCol.anchorMin = _zoomCol.anchorMax = new Vector2(1, 0.62f);
+        _zoomCol.pivot = new Vector2(1, 0.5f);
+        _zoomCol.anchoredPosition = new Vector2(-28, 0);
+        var zv = _zoomCol.gameObject.AddComponent<VerticalLayoutGroup>();
+        zv.spacing = 12;
+        zv.childControlWidth = zv.childControlHeight = true;
+        zv.childForceExpandWidth = zv.childForceExpandHeight = false;
+        var zf = _zoomCol.gameObject.AddComponent<ContentSizeFitter>();
+        zf.horizontalFit = zf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+        MakeButton("ZoomIn", _zoomCol, "+", panelColor, 96, 96, () => ZoomPressed?.Invoke(1));
+        MakeButton("ZoomOut", _zoomCol, "\u2212", panelColor, 96, 96, () => ZoomPressed?.Invoke(-1));
+        var fitBtn = MakeButton("ZoomFit", _zoomCol, "Fit", panelColor, 96, 80, () => ZoomPressed?.Invoke(0));
+        fitBtn.GetComponentInChildren<TextMeshProUGUI>().fontSize = 26;
+        _zoomCol.gameObject.SetActive(showZoomButtons);
+    }
+
+    public void SetZoomButtons(bool show)
+    {
+        showZoomButtons = show;
+        if (_zoomCol) _zoomCol.gameObject.SetActive(show);
     }
 
     void BuildBottom()
@@ -575,6 +646,7 @@ public class PracticalUI : MonoBehaviour
         _quizDlg = NewDialog("QuizDialog", 1240);
         var qh = NewText("Header", _quizDlg, "CHECK YOUR UNDERSTANDING", 26, accent, FontStyles.Bold, TextAlignmentOptions.Center);
         qh.characterSpacing = 6;
+        _quizHeader = qh;
         _quizCounter = NewText("Counter", _quizDlg, "", 28, textMuted, FontStyles.Normal, TextAlignmentOptions.Center);
         _quizQuestion = NewText("Question", _quizDlg, "", 42, textMain, FontStyles.Bold, TextAlignmentOptions.Center);
         _quizOptions = NewRect("Options", _quizDlg);
@@ -585,6 +657,31 @@ public class PracticalUI : MonoBehaviour
         ov.childForceExpandHeight = false;
         _quizFeedback = NewText("Feedback", _quizDlg, "", 30, success, FontStyles.Normal, TextAlignmentOptions.Center);
         _quizContinue = MakeButton("Continue", _quizDlg, "Continue", accent, 0, 88, null);
+
+        // ---- Angle input ----
+        _angleDlg = NewDialog("AngleDialog", 900);
+        _angleTitle = NewText("Title", _angleDlg, "", 44, textMain, FontStyles.Bold, TextAlignmentOptions.Center);
+        _anglePrompt = NewText("Prompt", _angleDlg, "", 30, textMuted, FontStyles.Normal, TextAlignmentOptions.Center);
+        _angleValue = NewText("Value", _angleDlg, "0\u00b0", 120, accent, FontStyles.Bold, TextAlignmentOptions.Center);
+        var arow = NewRect("Steps", _angleDlg);
+        var arh = arow.gameObject.AddComponent<HorizontalLayoutGroup>();
+        arh.spacing = 14;
+        arh.childControlWidth = arh.childControlHeight = true;
+        arh.childForceExpandWidth = true;
+        arh.childForceExpandHeight = false;
+        MakeButton("M5", arow, "\u2212 5", panelLight, 0, 96, () => ChangeAngle(-5));
+        MakeButton("M1", arow, "\u2212 1", panelLight, 0, 96, () => ChangeAngle(-1));
+        MakeButton("P1", arow, "+ 1", panelLight, 0, 96, () => ChangeAngle(1));
+        MakeButton("P5", arow, "+ 5", panelLight, 0, 96, () => ChangeAngle(5));
+        MakeButton("Submit", _angleDlg, "Record this reading", accent, 0, 92, () => { var a = _angleSubmit; HideOverlays(); a?.Invoke(_angle); });
+
+        // ---- Info / table ----
+        _infoDlg = NewDialog("InfoDialog", 1300);
+        _infoTitle = NewText("Title", _infoDlg, "", 46, textMain, FontStyles.Bold, TextAlignmentOptions.Center);
+        _infoBody = NewText("Body", _infoDlg, "", 30, textMuted);
+        _infoBody.lineSpacing = 10;
+        var ib = MakeButton("Close", _infoDlg, "Continue", accent, 0, 90, () => { var a = _infoClose; HideOverlays(); a?.Invoke(); });
+        _infoBtnLabel = ib.GetComponentInChildren<TextMeshProUGUI>();
 
         // ---- Theme picker ----
         _themeDlg = NewDialog("ThemeDialog", 820);
@@ -628,7 +725,7 @@ public class PracticalUI : MonoBehaviour
     {
         _overlay.gameObject.SetActive(true);
         _overlay.SetAsLastSibling();
-        foreach (var d in new[] { _pauseDlg, _confirmDlg, _procDlg, _quizDlg, _resultDlg, _introDlg, _themeDlg })
+        foreach (var d in new[] { _pauseDlg, _confirmDlg, _procDlg, _quizDlg, _resultDlg, _introDlg, _themeDlg, _angleDlg, _infoDlg })
             d.gameObject.SetActive(d == dialog);
         _blocking = true;
         if (pauseGame && !IsPaused) { IsPaused = true; Time.timeScale = 0f; }
